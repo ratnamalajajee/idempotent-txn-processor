@@ -208,36 +208,45 @@ ledger write (section 8).
 * The CSV adapter fails fast on missing required columns (a configuration error) but isolates bad
   rows (data errors).
 
-## 7. AI-assisted development: how it was used and how it was validated
+## 7. AI-assisted development: how I used it and how I validated it
 
-**Tooling:** Claude Code (Anthropic) as a pair programmer in the IDE.
+I used **Claude Code** (Anthropic) as a pair programmer in VS Code. I treated it like a fast junior
+engineer: good at producing a first draft quickly, but every decision that affects money had to be
+justified by me and proven by a test before I accepted it.
 
-**Where AI sped things up:**
-* Turning the brief into a requirement-to-component map (the table in the README), and drafting the
-  decision tables in this note.
-* Boilerplate-heavy code: records, the CSV adapter, the JSON writer, the report formatter.
-* Generating the edge-case test matrix (18 validation cases, ordering permutations), which I
-  then reviewed for meaning, not just for passing.
+**Where AI saved me time:**
+* Turning the brief into a requirement-to-component map (the table in the README), so I could see
+  early that the input mechanism was the easy part and idempotency plus ordering were the real work.
+* Boilerplate: records, the CSV adapter, the small JSON writer, the report formatting, the build setup.
+* Drafting a broad test matrix (18 validation cases, ordering permutations). I then went through
+  each test to make sure it asserted the business outcome (balances, single posting, status), not
+  just "no exception".
 
-**Where judgement overrode or refined generated output:**
-* **Dedup on first claim, not on completion.** The "obvious" check (has this transaction been
-  *processed*?) would double-process a duplicate that arrives during a retry. A test now pins this down.
-* **Payload fingerprint plus a conflict outcome.** Treating any repeat transactionId as a duplicate
-  would hide a different-amount resend. It is now rejected loudly.
-* **Lost ack after commit.** Retry logic that only simulates "fail before write" looks correct but
-  hides the real double-posting risk. Added the `AFTER_COMMIT` fault mode and an idempotent gateway contract.
-* **Poison records and permanently failed transactions must release their sequence slot.**
-  Otherwise one bad row (row 5 in the brief) blocks the stream. This was made configurable rather than hardcoded.
-* **Stale diagnostic.** The first version stamped `WAITING_FOR_SEQUENCE_n` on pending records.
-  Running the edge-case sample showed it went stale once other sequences arrived, so it became a
-  stable reason plus a live `missingSequences` view.
-* **No real sleeps in tests.** Clock and sleeper are injected; retry backoff is exercised
-  deterministically in milliseconds of test time.
+**Where I pushed back or changed the design:**
+* **Dedup on first claim, not on completion.** A simple "has this transaction already been processed?"
+  check would let a duplicate through while the original is still pending or retrying. I made the
+  claim itself the dedup gate and added a test for a duplicate arriving during PENDING.
+* **Same ID, different payload.** Treating every repeated transactionId as a harmless duplicate would
+  hide a resend with a different amount. I added a payload fingerprint and an explicit
+  `IDEMPOTENCY_KEY_CONFLICT` rejection.
+* **The lost-acknowledgement case.** Simulating only "fail before write" makes retries look safe
+  when they aren't. The dangerous case in real payment systems is a timeout *after* the downstream
+  has committed, so I added the `AFTER_COMMIT` fault mode and made the posting gateway idempotent by contract.
+* **One bad record must not stop the stream.** With strict sequencing, row 5 of the brief (invalid
+  amount) would have blocked row 6 forever. I let rejected and permanently failed records release
+  their slot, and made it configurable, because some customers would rather halt and repair.
+* **A misleading status reason.** The first version labelled pending records `WAITING_FOR_SEQUENCE_n`.
+  When I ran the edge-case file I saw that the label went stale as other records arrived. I changed
+  it to a stable reason and added a live "missing sequences" section to the report.
+* **Deterministic tests.** I asked for the clock and the sleep to be injectable so retry backoff
+  is tested without real waiting, which keeps the suite fast and not flaky.
 
-**Validation process:** every generated change was read line by line, then checked by
-(1) targeted tests written to fail first on the risky scenario, (2) running both sample files
-through the real CLI and reading the logs and report, and (3) checking final balances by hand
-(100 - 40 + 25 = 85).
+**How I validated it:**
+1. Read every generated change myself before keeping it.
+2. Wrote targeted tests for the risky scenarios (duplicates, out-of-order, retries, partial failure)
+   and made sure they would fail if the protection were removed.
+3. Ran both sample files through the real command-line app and read the logs and the report line by line.
+4. Checked the money by hand: ACC-201 = 100 - 40 + 25 = 85, ACC-203 = 500, one ledger entry per transaction.
 
 ## 8. Production hardening: next steps
 
